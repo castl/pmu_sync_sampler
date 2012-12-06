@@ -1,1 +1,7 @@
 *.o
+#<AutoIgnore>
+exercise1
+hello
+sender/sender
+textreader
+#<AutoIgnore/>
