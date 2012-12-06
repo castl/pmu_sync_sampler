@@ -15,5 +15,3 @@ all:
 clean:
 	make -C /proj/castl/home/jdd/android/linaro-kernel M=$(PWD) clean
 
-up: pmu_sync_sample.ko
-	scp pmu_sync_sample.ko android:/system/lib/modules/3.2.0+/
