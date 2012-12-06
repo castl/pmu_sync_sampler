@@ -5,28 +5,20 @@
 #include <linux/module.h>       /* Needed by all modules */
 #include <linux/kernel.h>       /* Needed for KERN_ERR */
 #include <asm/io.h>
-#include <linux/interrupt.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
-#include <linux/kprobes.h>
 #include <asm/uaccess.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
-#include <asm/apic.h>
-#include <asm/msr-index.h>
-#include <asm/perf_event.h>
-#include <asm/nmi.h>
-#include <linux/kdebug.h>
 
 #include "sample_buffer.h"
+#include "pmu_api.h"
 
 #define MIN_PERIOD 10000
-#define NUM_CTRS   4
 
-static unsigned int num_counters = 0;
-static unsigned int period = 100000;
-static volatile unsigned char shutdown = 0;
-static volatile uint64_t total_interrupts = 0;
+uint64_t period = 100000;
+volatile unsigned char shutdown = 0;
+volatile uint64_t total_interrupts = 0;
 
 struct blist {
     spinlock_t lock;
@@ -207,55 +199,17 @@ static struct int_attr ctr3_attr = {
 };
 
 
-#define PRDBG(X) printk(KERN_ERR "State: " #X " 0x%x", __raw_readl( (X) ))
-
 static void initialize_buffer(struct buffer* b) {
     b->core = smp_processor_id();
     b->num_samples = 0;
 }
 
-#define read_ccnt(V) rdmsrl(MSR_ARCH_PERFMON_FIXED_CTR1, V)
-#define write_ccnt(V) wrmsrl(MSR_ARCH_PERFMON_FIXED_CTR1, (V))
-#define read_pmn(I, V) rdmsrl(MSR_ARCH_PERFMON_PERFCTR0 + (I), V)
-#define read_cnf(I, V) rdmsrl(MSR_ARCH_PERFMON_EVENTSEL0 + (I), V)
-#define pmn_config(I, C) wrmsrl(MSR_ARCH_PERFMON_EVENTSEL0 + (I), \
-            ((0xFFFF & C)) | (1ULL << 16) /* USR */   \
-            | (1ULL << 17) /* OS */       \
-            | (1ULL << 22) /* EN */ );
 
-static void dump_regs(void) {
-    uint64_t c, c0, c1, c2, c3, g;
-    read_ccnt(c);
-    c0 = native_read_msr(MSR_ARCH_PERFMON_PERFCTR0 + 0); 
-    c1 = native_read_msr(MSR_ARCH_PERFMON_PERFCTR0 + 1); 
-    c2 = native_read_msr(MSR_ARCH_PERFMON_PERFCTR0 + 2); 
-    c3 = native_read_msr(MSR_ARCH_PERFMON_PERFCTR0 + 3); 
-    // read_pmn(0, c0);
-    // read_pmn(1, c1);
-    // read_pmn(2, c2);
-    // read_pmn(3, c3);
-    
-    printk(KERN_ERR "[%u] %llu, %llu, %llu, %llu, %llu",
-        smp_processor_id(), c, c0, c1, c2, c3 );
-
-    read_cnf(0, c0);
-    read_cnf(1, c1);
-    read_cnf(2, c2);
-    read_cnf(3, c3);
-    
-
-    rdmsrl(MSR_CORE_PERF_GLOBAL_STATUS, c);
-    rdmsrl(MSR_CORE_PERF_GLOBAL_CTRL, g);
-    printk(KERN_ERR "[%u] config (%llx, %llx) %llx, %llx, %llx, %llx",
-        smp_processor_id(), c, g, c0, c1, c2, c3 );
-
-}
-
-
-static void gatherSample(void) {
+void gatherSample(void) {
     unsigned int proc = smp_processor_id();
     struct buffer* b = per_cpu(lbuffer, proc); 
     struct sample* s;
+    unsigned i;
 
     if (b == NULL) {
         b = pop_blist(&empty_buffers);
@@ -268,15 +222,12 @@ static void gatherSample(void) {
         per_cpu(lbuffer, proc) = b;
     }
     s = &b->samples[b->num_samples++];
-    read_ccnt(s->cycles);
+    s->cycles = read_ccnt();
     s->cycles += period;
     s->pid = current->pid;
-    read_pmn(0, s->counters[0]);
-    read_pmn(1, s->counters[1]);
-    read_pmn(2, s->counters[2]);
-    read_pmn(3, s->counters[3]);
-    s->counters[4] = 0;
-    s->counters[5] = 0;
+    for (i=0; i<num_ctrs; i++) {
+        s->counters[i] = read_pmn(i);
+    }    
 
     if (b->num_samples >= BUFFER_ENTRIES) {
         append_blist(&full_buffers, b);
@@ -285,77 +236,23 @@ static void gatherSample(void) {
     }
 }
 
-static int __kprobes
-my_nmi_handler(struct notifier_block *self, unsigned long cmd, void *__args) {
-    size_t i;
-    total_interrupts += 1;
-
-    wrmsrl(MSR_CORE_PERF_GLOBAL_OVF_CTRL, (1ULL << 63) | (1ULL << 62) | (0xF));
-
-    gatherSample();
-
-    write_ccnt(0xFFFFFFFFFFFF - period);
-    for (i=0; i<NUM_CTRS; i++) {
-        wrmsrl(MSR_ARCH_PERFMON_PERFCTR0 + i, 0);
-    }
-
-    if (shutdown != 0) {
-        wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, 0);
-    }
-
-    native_apic_mem_write(APIC_LVTPC, APIC_DM_NMI); 
-    return NOTIFY_STOP;
-}
-
-static __read_mostly struct notifier_block my_nmi_notifier = {
-    .notifier_call  = my_nmi_handler,
-    .next           = NULL,
-    .priority       = 0,
-};
-
-void EnablePerfVect(uint32_t wantEnable) {
-    if (wantEnable) {
-        native_apic_mem_write(APIC_LVTPC, APIC_DM_NMI); //PERF_MON_VECTOR);
-    } else {
-        native_apic_mem_write(APIC_LVTPC, APIC_LVT_MASKED);
-    }
-    return;
-}
 
 static void startCtrs(void* d) {
     unsigned int proc = smp_processor_id();
+    unsigned long cfgs[6] = {
+        ctr0_attr.value,  
+        ctr1_attr.value, 
+        ctr2_attr.value, 
+        ctr3_attr.value
+    };
     printk(KERN_ERR "Configuring PMU on core %u\n", proc);
 
     if (per_cpu(lbuffer, proc) != NULL)
         append_blist(&empty_buffers, per_cpu(lbuffer, proc));
     per_cpu(lbuffer, proc) = NULL;
 
-    wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, 0);
-
-    EnablePerfVect(1);
-
-    // Overflow once every 'period' cycles
-    write_ccnt(0xFFFFFFFFFFFF - period);
-    pmn_config(0, ctr0_attr.value); 
-    pmn_config(1, ctr1_attr.value); 
-    pmn_config(2, ctr2_attr.value); 
-    pmn_config(3, ctr3_attr.value); 
-
-    wrmsrl(MSR_CORE_PERF_FIXED_CTR_CTRL, (0xAULL << 4));
-
-    wrmsrl(MSR_CORE_PERF_GLOBAL_OVF_CTRL,
-            (1ULL << 63) | (1ULL << 62) | (1ULL << 33) | (0xF));
-    wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, 0xF | (1ULL << 33));
-  
+    startCtrsLocal(cfgs);
 }
-
-static void stopCtrs(void* d) {
-    wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, 0);
-    wrmsrl(MSR_ARCH_PERFMON_EVENTSEL0, 0);
-
-    EnablePerfVect(0);
-}
-
 
 static void dumpCtrs(void* d) {
     dump_regs();
@@ -365,10 +262,9 @@ static void dumpCtrs(void* d) {
 static void stopAll(void) {
     shutdown = 1;
     // De-configure the counters
-    on_each_cpu(stopCtrs, NULL, 1);
+    on_each_cpu(stopCtrsLocal, NULL, 1);
 
-    // De-register NMI interrupt handler
-    unregister_die_notifier(&my_nmi_notifier);
+    deregister_interrupt();
 
     shutdown = 2;
 
@@ -392,7 +288,7 @@ static void process_status_update(void) {
 
             // De-configure the counters
             shutdown = 0;
-            register_die_notifier(&my_nmi_notifier);
+            register_interrupt();
             on_each_cpu(startCtrs, NULL, 1);
             break;
         case 2:
@@ -473,29 +369,17 @@ static int init_sysfs_entries(void)
 
 int init_module(void)
 {
-    int i;
+    int i, rc;
     printk(KERN_ERR "Initializing PMU Synchronous Sampler...");
     printk(KERN_ERR "    Attempting to turn on EMU...");
 
-    //Reserve PCMx
-    if (!reserve_perfctr_nmi(MSR_ARCH_PERFMON_PERFCTR0)) {
-        printk(KERN_ERR "   Error: couldn't reserve perfctr!");
-        return -EBUSY;
-    }
-
-    //Reserve PerfEvtSelx
-    if (!reserve_evntsel_nmi(MSR_ARCH_PERFMON_EVENTSEL0)) {
-        release_perfctr_nmi(MSR_ARCH_PERFMON_PERFCTR0);
-        printk(KERN_ERR "   Error: couldn't reserve perfctr!");
-        return -EBUSY;
+    if ((rc =initialize_arch()) != 0) {
+        return rc;
     }
 
     init_blist(&empty_buffers);
     init_blist(&full_buffers);
 
-    num_counters = 4;
-
-    printk(KERN_ERR "    Found %u counters", num_counters);
     printk(KERN_ERR "    Configuring interrupt handler");
 
     init_sysfs_entries();
@@ -537,12 +421,7 @@ void cleanup_module(void)
     printk(KERN_ERR "    De-configuring counters");
 
     stopAll();
-
-    //Release PCMx
-    release_perfctr_nmi(MSR_ARCH_PERFMON_PERFCTR0);
-
-    //Release PerfEvtSelx
-    release_evntsel_nmi(MSR_ARCH_PERFMON_EVENTSEL0);
+    cleanup_arch();
 
     printk(KERN_ERR "Flushing data");
 

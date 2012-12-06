@@ -1,1 +1,6 @@
 pmu_sync_sample.ko
+*.cmd
+*.order
+Module.symvers
+.tmp_versions
+*.mod.c
