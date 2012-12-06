@@ -1,0 +1,19 @@
+export ARCH=arm
+export SUBARCH=arm
+export CROSS_COMPILE=arm-linux-androideabi-
+export PATH:=/proj/castl/home/jdd/android/prebuilt/android-toolchain-eabi/bin:$(PATH)
+
+
+ccflags-y = -mtune=cortex-a9 -mcpu=cortex-a9 -fno-pic -mno-unaligned-access
+obj-m += pmu_sync_sample.o 
+
+pmu_sync_sample-objs := pmu_sync_sample_main.o v7_pmu.o arm.o
+
+all:
+	make -C /proj/castl/home/jdd/android/linaro-kernel M=$(PWD) modules
+
+clean:
+	make -C /proj/castl/home/jdd/android/linaro-kernel M=$(PWD) clean
+
+up: pmu_sync_sample.ko
+	scp pmu_sync_sample.ko android:/system/lib/modules/3.2.0+/
