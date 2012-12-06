@@ -1,0 +1,47 @@
+
+/* NETWORK PROTOCOL (Note that the `html' tags are documentation only):
+ *
+ * The connection starts with experiment info, in its own packet.
+ * <EXPERIMENT INFO>
+ *   From Byte 0:
+ *     "period:  (user-specified)\n"
+ *     "event1:  (user-specified)\n"
+ *       ...
+ *     "eventn:  (user-specified)\n"
+ *     '\0'
+ * </EXPERIMENT INFO>
+ *
+ *   NOTE:  the user specified data is not necessarily in any format,
+ *          the user may very well have included new-lines.  let us
+ *          hope that the user only placed numeric info there
+ *
+ * We then follow with repeated packets of sampling information:
+ * <HEAD>
+ *   Byte 0:  1 if Kernel, 0 if User
+ *   Byte 1:  number of counters (so 0 up to 256)
+ *   Byte 2:  core id (so we are limited for now to 256 cores)
+ *   Byte 3:  number samples present (so 0 up to 256)
+ *   UINT (Byte 4,5,6,7):  batch number of transmission
+ *   UINT (Byte 8,9,10,11):  samples missed FOR THIS ENTIRE BATCH
+ *   UINT (Byte 12,13,14,15):  item number within this batch
+ *   UINT (Byte 16,17,18,19):  pid of the sample
+ * </HEAD>
+ *
+ * <BODY>
+ *   <SAMPLE>
+ *     UINT (4 Bytes): # cycles spent
+ *     UINT (4 Bytes): zeroeth counter...
+ *        ...
+ *     UINT (4 Bytes): i'th counter
+ *   </SAMPLE>
+ *
+ *   <SAMPLE>
+ *     ...
+ *   </SAMPLE>
+ *
+ *   NUL terminated string for command line.
+ *       Empty if the previous item transmitted was for the same pid.
+ *   NUL terminated string for executable.
+ *       Empty if the previous item transmitted was for the same pid.
+ * </BODY>
+ */
